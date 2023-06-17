@@ -1,0 +1,29 @@
+[package]
+name = "thrust"
+version = "1.0.0"
+# published-at = "0x0"
+
+[dependencies.Sui]
+git = "https://github.com/MystenLabs/sui.git"
+subdir = "crates/sui-framework/packages/sui-framework"
+rev = "8b681515c0cf435df2a54198a28ab4ef574d202b"
+# local = "../../../sui/crates/sui-framework/packages/sui-framework"
+
+[dependencies.NftProtocol]
+git = "https://github.com/Origin-Byte/nft-protocol.git"
+subdir = "contracts/nft_protocol"
+rev = "3576af46c6053b542c7e1170b31d28cf18b4aead"
+# local = "../../../nft-protocol"
+
+# [dependencies.Permissions]
+# git = "https://github.com/Origin-Byte/nft-protocol.git"
+# subdir = "contracts/permissions"
+# rev = "a933149e07f1da95bc648ee4f95904d11e70bc8e"
+
+# [dependencies.Utils]
+# git = "https://github.com/Origin-Byte/nft-protocol.git"
+# subdir = "contracts/utils"
+# rev = "a933149e07f1da95bc648ee4f95904d11e70bc8e"
+
+[addresses]
+thrust = "0x0"

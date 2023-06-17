@@ -1,0 +1,51 @@
+{
+  "name": "snippets",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.ts",
+  "scripts": {
+    "deploy": "ts-node src/deploy.ts",
+    "activate": "ts-node src/moveCalls/activate.ts",
+    "deactivate": "ts-node src/moveCalls/deactivate.ts",
+    "give_filled": "ts-node src/moveCalls/give_filled.ts",
+    "give_random": "ts-node src/moveCalls/give_random.ts",
+    "buy_rand": "ts-node src/moveCalls/buy_rand.ts",
+    "buy_rand_coins": "ts-node src/moveCalls/buy_rand_coins.ts",
+    "claim_rand": "ts-node src/moveCalls/claim_rand.ts",
+    "claim_filled": "ts-node src/moveCalls/claim_filled.ts",
+    "swap": "ts-node src/moveCalls/swap.ts",
+    "recycle": "ts-node src/moveCalls/recycle.ts",
+    "transfer_admin": "ts-node src/moveCalls/transfer_admin.ts",
+    "set_batch": "ts-node src/moveCalls/set_batch.ts",
+    "set_nft": "ts-node src/moveCalls/set_nft.ts",
+    "set_coin": "ts-node src/moveCalls/set_coin.ts",
+    "collect": "ts-node src/moveCalls/collect.ts",
+    "register": "ts-node src/moveCalls/register.ts",
+    "dev": "tsc --watch",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "prettier": "prettier 'src/**/*.ts'"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^18.16.3",
+    "@typescript-eslint/eslint-plugin": "^5.59.1",
+    "@typescript-eslint/parser": "^5.59.1",
+    "eslint": "^8.39.0",
+    "eslint-config-standard-with-typescript": "^27.0.1",
+    "eslint-plugin-import": "^2.27.5",
+    "eslint-plugin-n": "^15.7.0",
+    "eslint-plugin-promise": "^6.1.1",
+    "prettier": "^2.8.8",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.0.4"
+  },
+  "dependencies": {
+    "@mysten/sui.js": "^0.32.2",
+    "csv": "^6.2.10",
+    "dotenv": "^16.0.3",
+    "path": "^0.12.7",
+    "superstruct": "^1.0.3"
+  }
+}

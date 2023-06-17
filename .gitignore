@@ -1,0 +1,4 @@
+/contract/build
+/contract/Move.lock
+/scripts/node_modules
+.env
