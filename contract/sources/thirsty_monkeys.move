@@ -8,12 +8,13 @@ module thrust::thirsty_monkeys {
     use sui::coin;
     use sui::clock;
     use sui::display;
-    use sui::balance::{Self, Balance, Supply};
+    use sui::balance::{Self, Balance};
     use sui::object::{Self, ID, UID};
     use sui::url;
     use sui::transfer::{public_transfer, public_share_object};
     use sui::tx_context::{Self, TxContext};
-    use sui::package;
+    use sui::package::{Publisher, claim};
+    use sui::dynamic_field as df;
 
     use nft_protocol::collection;
     use nft_protocol::creators;
@@ -26,22 +27,18 @@ module thrust::thirsty_monkeys {
     use ob_utils::utils;
     use ob_request::transfer_request;
 
-    use thrust::parse;
-
     // ========== errors ==========
 
     const ESaleInactive: u64 = 0;
-    const EFundsInsufficient: u64 = 1;
+    const EWrongCoinAmount: u64 = 1;
     const ENotVerified: u64 = 2;
-    const ENoBottleLeft: u64 = 3;
-    const EWrongTestNft: u64 = 4;
+    const ENotEnoughLeft: u64 = 3;
+    const EExceededSupply: u64 = 4;
     const ESaleNotStarted: u64 = 5;
     const ESaleEnded: u64 = 6;
-    const EWrongTestCoin: u64 = 7;
-    const EBadRange: u64 = 8;
-    const ETooFewBytes: u64 = 9;
+    const ETooFewBytes: u64 = 7;
 
-    const ONE_HOUR_IN_SECONDS: u64 = 60 * 60;
+    const ONE_HOUR_IN_MS: u64 = 60 * 60 * 1000;
 
     // ========== witnesses ==========
 
@@ -62,28 +59,33 @@ module thrust::thirsty_monkeys {
         url: url::Url,
     }
 
+    struct ProofOfMint has key, store {
+        id: UID,
+        nft_ids: vector<u64>,
+    }
+
     struct Thrust has key, store {
         id: UID,
         active: bool,
         start_timestamp: u64,
         initial_price: u64,
         quantity_per_batch: u64,
+        total_purchased: u64,
         balance: Balance<SUI>,
     }
 
-    struct MintCap<phantom T> has key, store {
+    struct MintCap has key, store {
         id: UID,
         collection_id: ID,
-        supply: Supply<T>,
+        refund_batch: u64,
+        supply: Supply,
     }
 
-    // ========== structs ==========
+    // ========== resources ==========
 
-    struct StructTag has store, copy, drop {
-        package_id: ID,
-        module_name: String,
-        struct_name: String,
-        generics: vector<String>, 
+    struct Supply has store {
+        max: u64,
+        current: u64,
     }
 
     // ========== functions ==========
@@ -97,17 +99,20 @@ module thrust::thirsty_monkeys {
                 start_timestamp: 0,
                 initial_price: 0,
                 quantity_per_batch: 0,
+                total_purchased: 0,
                 balance: balance::zero(),
             }
         );
 
-        public_transfer(package::claim(otw, ctx), tx_context::sender(ctx));
+        public_transfer(claim(otw, ctx), tx_context::sender(ctx));
     }
 
     // === Admin Functions ===
 
-    entry fun approve_sale_and_create_collection(
-        publisher: &package::Publisher,
+    public fun approve_sale_and_create_collection(
+        publisher: &Publisher,
+        clock: &clock::Clock,
+        thrust: &mut Thrust,
         description: vector<u8>,
         project_url: vector<u8>,
         creator: address,
@@ -121,8 +126,16 @@ module thrust::thirsty_monkeys {
             url::new_unsafe_from_bytes(b"https://halcyon.builders"),
         );
 
-        // TODO: mint cap management (OB only in init)
-        // let mint_cap = mint_cap::new(dw, object::id(&collection), supply, ctx);
+        let current_batch = current_batch(thrust, clock);
+        let mint_cap = MintCap {
+            id: object::new(ctx),
+            collection_id: object::id(&collection),
+            refund_batch: current_batch,
+            supply: Supply {
+                max: thrust.quantity_per_batch * current_batch,
+                current: 0,
+            }
+        };
 
         let keys = vector[
             utf8(b"name"),
@@ -164,31 +177,75 @@ module thrust::thirsty_monkeys {
         // public_share_object(mint_cap);
         public_transfer(transfer_policy_cap, creator);
         public_transfer(p2p_policy_cap, creator);
+        public_share_object(mint_cap);
         public_share_object(collection);
         public_share_object(transfer_policy);
         public_share_object(p2p_policy);
     }
 
-    entry fun cancel_sale_and_refund(_: &package::Publisher) {
+    public fun cancel_sale_and_refund(_: &Publisher) {
         // TODO
     }
 
     // ========== public functions ==========
 
-    entry fun give_nfts(
-        _: &package::Publisher,
-        receivers: vector<address>,
-        ctx: &mut TxContext,
-    ) {
-        let (i, nb) = (0, vector::length(&receivers));
-        while (i < nb) {
-            public_transfer(mint_nft(ctx), vector::pop_back(&mut receivers));
-            i = i + 1;
+    public fun new_whitelist(_: &Publisher, ctx: &mut TxContext): Whitelist {
+        Whitelist {
+            id: object::new(ctx),
+        }
+    }
+
+    public fun new_proof_of_mint(ctx: &mut TxContext): ProofOfMint {
+        ProofOfMint {
+            id: object::new(ctx),
+            nft_ids: vector::empty(),
         }
     }
     
-    // entry fun give_nfts_(
-    //     _: package::Publisher,
+    public fun buy_nfts(
+        thrust: &mut Thrust,
+        pom: &mut ProofOfMint,
+        funds: coin::Coin<SUI>,
+        clock: &clock::Clock,
+        magic_nb: u64,
+        amount: u64,
+        ctx: &mut TxContext,
+    ) {
+        assert_is_active(thrust, clock);
+        assert_is_verified(magic_nb, ctx);
+        assert!(coin::value(&mut funds) == current_price(thrust, clock) * amount, EWrongCoinAmount);
+        let current_batch = current_batch(thrust, clock);
+        assert!(thrust.total_purchased < (current_batch + amount) * thrust.quantity_per_batch, ENotEnoughLeft);
+
+        let balance = coin::into_balance(funds);
+        balance::join(&mut thrust.balance, balance);
+
+        df::add(&mut pom.id, current_batch(thrust, clock), amount);
+        thrust.total_purchased = thrust.total_purchased + amount;
+    }
+
+    public fun buy_nfts_whitelist<N: key + store>(
+        wl: Whitelist,
+        thrust: &mut Thrust,
+        pom: &mut ProofOfMint,
+        funds: coin::Coin<SUI>,
+        clock: &clock::Clock,
+        magic_nb: u64,
+        amount: u64,
+        ctx: &mut TxContext,
+    ) {
+        let Whitelist { id } = wl;
+        object::delete(id);
+        buy_nfts(thrust, pom, funds, clock, magic_nb, amount, ctx)
+    }
+
+    public fun give_nft(
+        _: &Publisher,
+        _ctx: &mut TxContext,
+    ) {}
+    
+    // public fun give_nfts_(
+    //     _: Publisher,
     //     receivers: vector<address>,
     //     ctx: &mut TxContext,
     // ): vector<ThirstyMonkey> {
@@ -202,31 +259,8 @@ module thrust::thirsty_monkeys {
     //     nfts
     // }
 
-    // entry fun buy_nfts(
-    //     thrust: &mut Thrust,
-    //     funds: &mut coin::Coin<SUI>,
-    //     clock: &clock::Clock,
-    //     magic_nb: u64,
-    //     ctx: &mut TxContext,
-    // ) {
-        // assert_is_active(thrust, clock);
-        // assert!(thrust.left > 0, ENoBottleLeft);
-        // assert!(coin::value(funds) >= thrust.price, EFundsInsufficient);
-        // assert_is_verified(magic_nb, ctx);
 
-        // let balance = coin::balance_mut(funds);
-        // let amount = balance::split(balance, thrust.price);
-        // balance::join(&mut thrust.balance, amount);
-
-        // if (thrust.supply != 0) thrust.left = thrust.left - 1;
-    // }
-
-    entry fun buy_nfts_whitelist<N: key + store>() {
-        // assert!(is_same_type(&get_struct_tag<N>(), &dispenser.test_nft), EWrongTestNft);
-        // TODO: burn whitelist + buy_nfts 
-    }
-
-    entry fun claim_nft(
+    public fun claim_nft(
         ctx: &mut TxContext,
     ) {
         // TODO
@@ -259,7 +293,7 @@ module thrust::thirsty_monkeys {
     }
 
     // fun set_altcoin(
-    //     _: &package::Publisher, 
+    //     _: &Publisher, 
     //     dispenser: &mut Dispenser,
     //     gen1: vector<u8>,
     //     gen2: vector<u8>,
@@ -282,8 +316,8 @@ module thrust::thirsty_monkeys {
 
     // ========== admin setup functions ==========
 
-    entry fun set_sale(
-        _: &package::Publisher, 
+    public fun set_sale(
+        _: &Publisher, 
         thrust: &mut Thrust,
         active: bool,
         start_timestamp: u64,
@@ -297,32 +331,32 @@ module thrust::thirsty_monkeys {
         thrust.quantity_per_batch = quantity_per_batch;
     }
 
-    entry fun transfer_publisher(
-        publisher: package::Publisher, 
+    public fun transfer_publisher(
+        publisher: Publisher, 
         receiver: address, 
         _ctx: &mut TxContext
     ) {
         public_transfer(publisher, receiver);
     }
 
-    entry fun activate_sale(
-        _: &package::Publisher, 
+    public fun activate_sale(
+        _: &Publisher, 
         thrust: &mut Thrust, 
         _ctx: &mut TxContext
     ) {
         thrust.active = true;
     }
 
-    entry fun deactivate_sale(
-        _: &package::Publisher, 
+    public fun deactivate_sale(
+        _: &Publisher, 
         thrust: &mut Thrust, 
         _ctx: &mut TxContext
     ) {
         thrust.active = false;
     }
 
-    entry fun collect_profits(
-        _: &package::Publisher,
+    public fun collect_profits(
+        _: &Publisher,
         thrust: &mut Thrust,
         receiver: address,
         ctx: &mut TxContext
@@ -334,6 +368,32 @@ module thrust::thirsty_monkeys {
     }
 
     // ========== utils ==========
+
+    fun increment_supply(supply: &mut Supply, value: u64) {
+        assert!(
+            supply.current + value <= supply.max,
+            EExceededSupply,
+        );
+        supply.current = supply.current + value;
+    }
+
+    fun current_batch(thrust: &Thrust, clock: &clock::Clock): u64 {
+        let time = clock::timestamp_ms(clock);
+        let _batch_number = (time - thrust.start_timestamp) / ONE_HOUR_IN_MS - 1;
+        // if thrust
+        // TODO: calculate current batch with 10 max and if batch not sold out
+        1
+    }
+
+    fun current_price(thrust: &Thrust, clock: &clock::Clock): u64 {
+        thrust.initial_price + current_batch(thrust, clock) * thrust.initial_price / 2
+    }
+
+    // fun has_sale_ended(thrust: &Thrust, clock: &clock::Clock): bool {
+    //     let time = clock::timestamp_ms(clock);
+    //     let current_batch = (time - thrust.start_timestamp) / ONE_HOUR_IN_MS - 1;
+
+    // }
 
     fun assert_is_verified(magic_nb: u64, ctx: &mut TxContext) {
         let addr_in_bytes = address::to_bytes(tx_context::sender(ctx));
@@ -349,18 +409,6 @@ module thrust::thirsty_monkeys {
         assert!(thrust.start_timestamp < time, ESaleNotStarted); 
     }
 
-    fun get_struct_tag<T>(): StructTag {
-        let (package_id, module_name, struct_name, generics) = parse::type_name_decomposed<T>();
-
-        StructTag { package_id, module_name, struct_name, generics }
-    }
-
-    fun is_same_type(type1: &StructTag, type2: &StructTag): bool {
-        (type1.package_id == type2.package_id
-            && type1.module_name == type2.module_name
-            && type1.struct_name == type2.struct_name
-            && type1.generics == type2.generics)
-    }
 
     fun from_bytes(bytes: vector<u8>): u64 {
         assert!(vector::length(&bytes) >= 8, ETooFewBytes);
