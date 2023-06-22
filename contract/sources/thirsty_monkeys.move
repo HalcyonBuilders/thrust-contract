@@ -6,7 +6,7 @@ module thrust::thirsty_monkeys {
     use sui::address;
     use sui::sui::SUI;
     use sui::coin;
-    use sui::clock;
+    use sui::clock::{Clock, timestamp_ms};
     use sui::display;
     use sui::balance::{Self, Balance};
     use sui::object::{Self, ID, UID};
@@ -69,7 +69,7 @@ module thrust::thirsty_monkeys {
         active: bool,
         start_timestamp: u64,
         initial_price: u64,
-        quantity_per_batch: u64,
+        supply_per_batch: u64,
         total_purchased: u64,
         balance: Balance<SUI>,
     }
@@ -98,7 +98,7 @@ module thrust::thirsty_monkeys {
                 active: false,
                 start_timestamp: 0,
                 initial_price: 0,
-                quantity_per_batch: 0,
+                supply_per_batch: 0,
                 total_purchased: 0,
                 balance: balance::zero(),
             }
@@ -111,7 +111,7 @@ module thrust::thirsty_monkeys {
 
     public fun approve_sale_and_create_collection(
         publisher: &Publisher,
-        clock: &clock::Clock,
+        clock: &Clock,
         thrust: &mut Thrust,
         description: vector<u8>,
         project_url: vector<u8>,
@@ -132,7 +132,7 @@ module thrust::thirsty_monkeys {
             collection_id: object::id(&collection),
             refund_batch: current_batch,
             supply: Supply {
-                max: thrust.quantity_per_batch * current_batch,
+                max: thrust.supply_per_batch * current_batch,
                 current: 0,
             }
         };
@@ -206,22 +206,23 @@ module thrust::thirsty_monkeys {
         thrust: &mut Thrust,
         pom: &mut ProofOfMint,
         funds: coin::Coin<SUI>,
-        clock: &clock::Clock,
+        clock: &Clock,
         magic_nb: u64,
         amount: u64,
         ctx: &mut TxContext,
     ) {
-        assert_is_active(thrust, clock);
         assert_is_verified(magic_nb, ctx);
-        assert!(coin::value(&mut funds) == current_price(thrust, clock) * amount, EWrongCoinAmount);
-        let current_batch = current_batch(thrust, clock);
-        assert!(thrust.total_purchased < (current_batch + amount) * thrust.quantity_per_batch, ENotEnoughLeft);
+        assert!(thrust.active, ESaleInactive);
+        assert!(get_sale_status(thrust, clock) == 1, ESaleInactive);
+        let purchased = thrust.total_purchased;
+        assert!(purchased + amount < current_max_supply(thrust, clock), ENotEnoughLeft);
 
+        assert!(coin::value(&mut funds) == current_price(thrust, clock) * amount, EWrongCoinAmount);
         let balance = coin::into_balance(funds);
         balance::join(&mut thrust.balance, balance);
 
         df::add(&mut pom.id, current_batch(thrust, clock), amount);
-        thrust.total_purchased = thrust.total_purchased + amount;
+        thrust.total_purchased = purchased + amount;
     }
 
     public fun buy_nfts_whitelist<N: key + store>(
@@ -229,7 +230,7 @@ module thrust::thirsty_monkeys {
         thrust: &mut Thrust,
         pom: &mut ProofOfMint,
         funds: coin::Coin<SUI>,
-        clock: &clock::Clock,
+        clock: &Clock,
         magic_nb: u64,
         amount: u64,
         ctx: &mut TxContext,
@@ -322,13 +323,13 @@ module thrust::thirsty_monkeys {
         active: bool,
         start_timestamp: u64,
         initial_price: u64,
-        quantity_per_batch: u64,
+        supply_per_batch: u64,
         _ctx: &mut TxContext
     ) {
         thrust.active = active;
         thrust.start_timestamp = start_timestamp;
         thrust.initial_price = initial_price;
-        thrust.quantity_per_batch = quantity_per_batch;
+        thrust.supply_per_batch = supply_per_batch;
     }
 
     public fun transfer_publisher(
@@ -377,23 +378,33 @@ module thrust::thirsty_monkeys {
         supply.current = supply.current + value;
     }
 
-    fun current_batch(thrust: &Thrust, clock: &clock::Clock): u64 {
-        let time = clock::timestamp_ms(clock);
-        let _batch_number = (time - thrust.start_timestamp) / ONE_HOUR_IN_MS - 1;
-        // if thrust
-        // TODO: calculate current batch with 10 max and if batch not sold out
-        1
+    fun current_batch(thrust: &Thrust, clock: &Clock): u64 {
+        let time = timestamp_ms(clock);
+        (time - thrust.start_timestamp) / ONE_HOUR_IN_MS
     }
 
-    fun current_price(thrust: &Thrust, clock: &clock::Clock): u64 {
-        thrust.initial_price + current_batch(thrust, clock) * thrust.initial_price / 2
+    fun current_max_supply(thrust: &Thrust, clock: &Clock): u64 {
+        current_batch(thrust, clock) * thrust.supply_per_batch
     }
 
-    // fun has_sale_ended(thrust: &Thrust, clock: &clock::Clock): bool {
-    //     let time = clock::timestamp_ms(clock);
-    //     let current_batch = (time - thrust.start_timestamp) / ONE_HOUR_IN_MS - 1;
+    fun current_price(thrust: &Thrust, clock: &Clock): u64 {
+        thrust.initial_price + (current_batch(thrust, clock) - 1) * thrust.initial_price / 2
+    }
 
-    // }
+    fun get_sale_status(thrust: &Thrust, clock: &Clock): u64 {
+        let time = timestamp_ms(clock);
+        let status;
+
+        if (thrust.start_timestamp > time || thrust.total_purchased == current_max_supply(thrust, clock)) {
+		    status = 0; // sale closed
+        } else if (thrust.total_purchased == 10000 || thrust.total_purchased < current_max_supply(thrust, clock) - thrust.supply_per_batch) {
+            status = 2; // sale ended
+        } else {
+            status = 1; // sale in progress
+        };
+        
+        status
+    }
 
     fun assert_is_verified(magic_nb: u64, ctx: &mut TxContext) {
         let addr_in_bytes = address::to_bytes(tx_context::sender(ctx));
@@ -402,13 +413,6 @@ module thrust::thirsty_monkeys {
         let multiplied = ((b20_in_dec as u64) * (b19_in_dec as u64));
         assert!(multiplied == magic_nb, ENotVerified);
     }
-
-    fun assert_is_active(thrust: &Thrust, clock: &clock::Clock) {
-        assert!(thrust.active, ESaleInactive);
-        let time = clock::timestamp_ms(clock);
-        assert!(thrust.start_timestamp < time, ESaleNotStarted); 
-    }
-
 
     fun from_bytes(bytes: vector<u8>): u64 {
         assert!(vector::length(&bytes) >= 8, ETooFewBytes);
